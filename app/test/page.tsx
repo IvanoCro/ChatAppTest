@@ -1,97 +1,166 @@
 "use client"
+
 import { supabase } from "../../lib/supabase"
 import { useEffect, useState, useRef } from "react"
+import { useRouter } from "next/navigation"
 
 export default function TestPage() {
+  const [msg, setMsg] = useState("")
+  const [data, setData] = useState([])
+  const [user, setUser] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [errorMsg, setErrorMsg] = useState("")
 
-    const [msg, setMsg] = useState("");
-    const [data, setData] = useState([]);
-    const lastSentTime = useRef(0);
-    async function fetchMsgs() {
-        const { data: msgsData, error } = await supabase
-            .from("msgs")
-            .select("*")
+  const lastSentTime = useRef(0)
+  const router = useRouter()
 
-        if (error) {
-            console.log(error)
-        } else {
-            setData(msgsData)
-        }
+  async function fetchMsgs() {
+    try {
+      const { data, error } = await supabase
+        .from("msgs")
+        .select("*")
+        .order("created_at", { ascending: true })
+
+      if (error) {
+        console.error("FETCH ERROR:", error)
+        setErrorMsg(error.message)
+        return
+      }
+
+      setData(data || [])
+    } catch (err) {
+      console.error("fetchMsgs CRASH:", err)
+      setErrorMsg(err.message)
     }
+  }
 
-    useEffect(() => {
-    fetchMsgs()
+  useEffect(() => {
+    let channel
 
-    const channel = supabase
+    const init = async () => {
+      const { data: { session } } = await supabase.auth.getSession()
+
+      if (!session) {
+        router.push("/login")
+        return
+      }
+
+      setUser(session.user)
+
+      await fetchMsgs()
+
+      channel = supabase
         .channel("msgs-channel")
         .on(
-            "postgres_changes",
-            { event: "*", schema: "public", table: "msgs" },
-            (payload) => {
-                console.log("Promjena:", payload)
-                fetchMsgs() // refresh kad se nešto promijeni
-            }
+          "postgres_changes",
+          { event: "*", schema: "public", table: "msgs" },
+          () => {
+            fetchMsgs()
+          }
         )
         .subscribe()
 
+      setLoading(false)
+    }
+
+    init()
+
     return () => {
-        supabase.removeChannel(channel)
+      if (channel) supabase.removeChannel(channel)
     }
-}, [])
+  }, [router])
 
-   async function insertInBase(e) {
-    e.preventDefault();
+  async function insertInBase(e) {
+    e.preventDefault()
+    setErrorMsg("")
 
-    const now = Date.now();
+    if (!user) {
+      setErrorMsg("Nema usera")
+      return
+    }
 
-    
+    if (!msg.trim()) {
+      setErrorMsg("Prazna poruka")
+      return
+    }
+
+    const now = Date.now()
+
     if (now - lastSentTime.current < 3000) {
-        alert("Prebrzo šalješ poruke majmune");
-        return;
+      setErrorMsg("Prebrzo šalješ")
+      return
     }
 
-    if (!msg.trim()) return;
-
-    const { error } = await supabase
+    try {
+      const { error } = await supabase
         .from("msgs")
-        .insert([{ msg: msg }]);
+        .insert([{
+          msg: msg, 
+          user_id: user.id,
+          user_name: user.user_metadata?.user_name
+        }])
 
-    if (error) {
-        console.log(error);
-    } else {
-        lastSentTime.current = now; // update timer
-        setMsg("");
-        fetchMsgs();
+      if (error) {
+        console.error("INSERT ERROR:", error)
+        setErrorMsg(error.message)
+        return
+      }
+
+      lastSentTime.current = now
+      setMsg("")
+      fetchMsgs()
+
+    } catch (err) {
+      console.error("insertInBase CRASH:", err)
+      setErrorMsg(err.message)
     }
-}
+  }
 
-    return (
-        <div className="page">
-            <div className="intro">
-                <h1>Testiranje</h1>
-                <p>Budite good lil boys i nemojte spamat previse</p>
-            </div>
+  async function handleLogout() {
+    await supabase.auth.signOut()
+    router.push("/login")
+  }
 
-            <div className="msg-container">
-                {data.map((item) => (
-                    <div key={item.msg_id} className="msg-card">
-                        <span className="msg-id">#{item.msg_id}</span>
-                        <p className="msg-text">{item.msg}</p>
-                    </div>
-                ))}
-            </div>
+  if (loading) return <p>Loading...</p>
 
-            <div className="msg-form-container">
-                <form onSubmit={insertInBase}>
-                    <input
-                        type="text"
-                        placeholder="Vaša poruka..."
-                        value={msg}
-                        onChange={(e) => setMsg(e.target.value)}
-                    />
-                    <button type="submit">Pošalji</button>
-                </form>
-            </div>
-        </div>
-    )
+  return (
+    <div className="page">
+      <div className="intro">
+        <h1>Testiranje</h1>
+        <p>
+          Ulogiran kao: <b>{user?.user_metadata?.user_name || user?.email}</b>
+        </p>
+        <button onClick={handleLogout} className="logout-btn">
+          Logout
+        </button>
+      </div>
+
+      {errorMsg && <div className="error-msg">ERROR: {errorMsg}</div>}
+
+      <div className="msg-container">
+        {data.map((item) => (
+          <div 
+            key={item.msg_id} 
+            className={`msg-card ${item.user_name === (user?.user_metadata?.user_name || user?.email) ? 'own' : ''}`}
+          >
+            <p>
+              <b>{item.user_name || "Anon"}:</b> {item.msg}
+            </p>
+          </div>
+        ))}
+      </div>
+
+      <div className="msg-form-container">
+        <form onSubmit={insertInBase}>
+          <input
+            type="text"
+            value={msg}
+            onChange={(e) => setMsg(e.target.value)}
+            placeholder="Upiši poruku..."
+          />
+          <button type="submit">Pošalji</button>
+        </form>
+      </div>
+    </div>
+  )
 }
